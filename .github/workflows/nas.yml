@@ -1,0 +1,72 @@
+name: Cloud NAS (Cloudflare Tunnel)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Automatically restarts every 6 hours
+  workflow_dispatch:    # Allows manual start
+
+jobs:
+  deploy-nas:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to push data back to the repo
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Tools
+        run: |
+          # Install Filebrowser (Web-based File Manager)
+          curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+          
+          # Install Cloudflared (Tunnel)
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+
+      - name: Run NAS and Tunnel
+        run: |
+          # 1. Setup Git Identity
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 2. Start Filebrowser in the background
+          # Storage directory is the repo root. Runs on 8080 internally.
+          filebrowser -r ./ -p 8080 --noauth & 
+
+          # 3. Start Cloudflare Tunnel (Quick Tunnel mode)
+          # We capture the log to extract the temporary URL
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          
+          # Give it a moment to generate the URL
+          sleep 10
+          echo "--- NAS ACCESS URL ---"
+          grep -o 'https://.*\.trycloudflare\.com' tunnel.log | head -n 1
+          echo "-----------------------"
+
+          # 4. Persistence Loop (Sync to Repo every 10 minutes)
+          (
+            while true; do
+              sleep 600 
+              echo "Syncing data to repository..."
+              git add .
+              # Only commit if there are changes
+              if ! git diff --cached --quiet; then
+                git commit -m "Automated NAS Sync [$(date)]"
+                git push
+              else
+                echo "No changes to sync."
+              fi
+            done
+          ) &
+
+          # 5. Keep Alive & Shutdown Timer
+          # GitHub kills actions at 6 hours (21600 seconds). 
+          # We sleep for slightly less to allow a final graceful sync.
+          sleep 21000 
+          
+          echo "6-hour window closing. Performing final sync..."
+          git add .
+          git commit -m "Final Sync before restart" || true
+          git push || true
